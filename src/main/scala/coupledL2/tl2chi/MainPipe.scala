@@ -64,6 +64,14 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
       val mshr_alloc_ptr = Input(UInt(mshrBits.W))
     }
 
+    val toAtomicsUnit = new Bundle() {
+      val atomicsRequest = ValidIO(new AtomicsReq())
+    }
+
+    val fromAtomicsUnit = new Bundle() {
+      val atomicsResult = Input(UInt(64.W))
+    }
+
     /* read C-channel Release Data and write into DS */
     val bufResp = Input(new PipeBufferResp)
 
@@ -94,6 +102,9 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
 
     /* read DS and write data into ReleaseBuf when the task needs to replace */
     val releaseBufWrite = ValidIO(new MSHRBufWrite())
+
+    /* for AMO */
+    val refillBufWrite = ValidIO(new MSHRBufWrite())
 
     /* nested writeback */
     val nestedwb = Output(new NestedWriteback())
@@ -156,6 +167,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   val sinkB_req_s3    = !mshr_req_s3 && req_s3.fromB
   val sinkC_req_s3    = !mshr_req_s3 && req_s3.fromC
 
+  val req_atomic_s3             = sinkA_req_s3 && (req_s3.opcode === ArithmeticData || req_s3.opcode === LogicalData)
   val req_acquire_s3            = sinkA_req_s3 && (req_s3.opcode === AcquireBlock || req_s3.opcode === AcquirePerm)
   val req_acquireBlock_s3       = sinkA_req_s3 && req_s3.opcode === AcquireBlock
   val req_prefetch_s3           = sinkA_req_s3 && req_s3.opcode === Hint
@@ -188,6 +200,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   val mshr_evict_s3             = mshr_req_s3 && req_s3.toTXREQ && req_s3.chiOpcode.get === Evict
   
   val mshr_cbWrData_s3          = mshr_req_s3 && req_s3.toTXDAT && req_s3.chiOpcode.get === CopyBackWrData
+  val mshr_ncbWrData_s3         = mshr_req_s3 && req_s3.toTXDAT && req_s3.chiOpcode.get === NonCopyBackWrData
 
   val meta_has_clients_s3       = meta_s3.clients.orR
   val req_needT_s3              = needT(req_s3.opcode, req_s3.param)
@@ -195,8 +208,9 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   val cmo_cbo_retention_s3      = req_cbo_clean_s3 || req_cbo_flush_s3
   val cmo_cbo_s3                = req_cbo_clean_s3 || req_cbo_flush_s3 || req_cbo_inval_s3
 
-  val cache_alias               = req_acquire_s3 && dirResult_s3.hit && meta_s3.clients(0) &&
-                              meta_s3.alias.getOrElse(0.U) =/= req_s3.alias.getOrElse(0.U)
+  val cache_alias               = (req_acquire_s3 && dirResult_s3.hit && meta_s3.clients(0) &&
+                                   meta_s3.alias.getOrElse(0.U) =/= req_s3.alias.getOrElse(0.U)) ||
+                                  (req_atomic_s3 && dirResult_s3.hit && meta_s3.state === TRUNK)
 
   val mshr_refill_s3 = mshr_accessackdata_s3 || mshr_hintack_s3 || mshr_grant_s3 // needs refill to L2 DS
   val replResp_valid_s3 = io.replResp.valid
@@ -207,7 +221,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
 
   /* ======== Interact with MSHR ======== */
   val acquire_on_miss_s3 = req_acquire_s3 || req_prefetch_s3 || req_get_s3
-  val acquire_on_hit_s3 = meta_s3.state === BRANCH && req_needT_s3 && !req_prefetch_s3
+  val acquire_on_hit_s3 = meta_s3.state === BRANCH && req_needT_s3 && !req_prefetch_s3 && !req_atomic_s3
   val need_acquire_s3_a = req_s3.fromA && (Mux(
     dirResult_s3.hit,
     acquire_on_hit_s3,
@@ -217,8 +231,9 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     req_get_s3 && (meta_s3.state === TRUNK) ||
     req_cbo_clean_s3 && (meta_s3.state === TRUNK) ||
     req_cbo_flush_s3 ||
-    req_cbo_inval_s3
+    req_cbo_inval_s3 || (req_atomic_s3 && dirResult_s3.hit && meta_s3.state === TIP)
   )
+
   val need_release_s3_a = dirResult_s3.hit && (
     req_cbo_clean_s3 && (!need_probe_s3_a && meta_s3.dirty) ||
     req_cbo_flush_s3 && (isValid(meta_s3.state)) ||
@@ -227,7 +242,9 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   val need_cmoresp_s3_a = cmo_cbo_s3
   val need_compack_s3_a = !cmo_cbo_s3
 
-  val need_mshr_s3_a = need_acquire_s3_a || need_probe_s3_a || cache_alias
+  val need_atomic_s3_a = (req_atomic_s3 && (!dirResult_s3.hit || (dirResult_s3.hit && meta_s3.state === BRANCH)))
+
+  val need_mshr_s3_a = need_acquire_s3_a || need_probe_s3_a || cache_alias || req_atomic_s3
   
   /**
     * 1. For SnpOnce/SnpOnceFwd, SnpQuery, and SnpStash, only the latest copy of the cacheline is needed without changing
@@ -419,7 +436,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   val hasData_s3_chi = source_req_s3.toTXDAT // whether to respond data to CHI-side
   val hasData_s3 = hasData_s3_tl || hasData_s3_chi
 
-  val need_data_a = dirResult_s3.hit && (req_get_s3 || req_acquireBlock_s3)
+  val need_data_a = dirResult_s3.hit && (req_get_s3 || req_acquireBlock_s3 || req_atomic_s3)
   val need_data_b = sinkB_req_s3 && (doRespData || doFwd || dirResult_s3.hit && meta_s3.state === TRUNK)
   val need_data_mshr_repl = mshr_refill_s3 && need_repl && !retry
   val need_data_cmo = cmo_cbo_s3 && dirResult_s3.hit && meta_s3.dirty
@@ -428,7 +445,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   val wen_c = sinkC_req_s3 && isParamFromT(req_s3.param) && req_s3.opcode(0) && dirResult_s3.hit
   val wen_mshr = req_s3.dsWen && (
     mshr_snpRespX_s3 || mshr_snpRespDataX_s3 ||
-    mshr_writeCleanFull_s3 || mshr_writeBackFull_s3 || 
+    mshr_writeCleanFull_s3 || mshr_writeBackFull_s3 ||
     mshr_writeEvictFull_s3 || mshr_writeEvictOrEvict_s3 || mshr_evict_s3 ||
     mshr_refill_s3 && !need_repl && !retry
   )
@@ -469,11 +486,12 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     cache_alias ||
     need_data_b && need_mshr_s3_b ||
     need_data_mshr_repl ||
-    need_data_cmo
+    need_data_cmo ||
+    req_atomic_s3 && meta_s3.state === TRUNK
   // B: need_write_refillBuf indicates that DS should be read and the data will be written into RefillBuffer
   //    when L1 AcquireBlock but L2 AcquirePerm to L3, we need to prepare data for L1
   //    but this will no longer happen, cuz we always AcquireBlock for L1 AcquireBlock
-  val need_write_refillBuf = false.B
+  val need_write_refillBuf = req_atomic_s3 && meta_s3.state === TIP
 
   /* ======== Write Directory ======== */
   val metaW_valid_s3_a = sinkA_req_s3 && !need_mshr_s3_a && !req_get_s3 && !req_prefetch_s3 && !cmo_cbo_s3 // get & prefetch that hit will not write meta
@@ -585,15 +603,15 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   )
   val isTXDAT_s3 = Mux(
     mshr_req_s3,
-    mshr_snpRespDataX_s3 || mshr_cbWrData_s3 || mshr_dct_s3,
+    mshr_snpRespDataX_s3 || mshr_cbWrData_s3 || mshr_ncbWrData_s3 || mshr_dct_s3,
     req_s3.fromB && !need_mshr_s3 && (doRespDataHitRelease || doRespData && !data_unready_s3)
   )
   val isTXDAT_s3_ready = Mux(
     mshr_req_s3,
-    mshr_snpRespDataX_s3 || mshr_cbWrData_s3 || mshr_dct_s3,
+    mshr_snpRespDataX_s3 || mshr_cbWrData_s3 || mshr_ncbWrData_s3 || mshr_dct_s3,
     req_s3.fromB && !need_mshr_s3 && (doRespDataHitRelease || doRespData && !data_unready_s3) && !txdat_s3_latch.B
   )
-  val isTXREQ_s3 = mshr_req_s3 && (mshr_writeBackFull_s3 || mshr_writeCleanFull_s3 || 
+  val isTXREQ_s3 = mshr_req_s3 && (mshr_writeBackFull_s3 || mshr_writeCleanFull_s3 ||
      mshr_writeEvictFull_s3 || mshr_writeEvictOrEvict_s3 || mshr_evict_s3)
 
   txreq_s3.valid := task_s3.valid && isTXREQ_s3
@@ -603,7 +621,8 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   txreq_s3.bits := source_req_s3.toCHIREQBundle()
   txrsp_s3.bits := source_req_s3
   txdat_s3.bits.task := source_req_s3
-  txdat_s3.bits.data.data := data_s3
+  // mshr_ncbWrData_s3 only for AMO, not good enough
+  txdat_s3.bits.data.data := Mux(mshr_ncbWrData_s3, req_s3.amo_data, data_s3)
   d_s3.bits.task := source_req_s3
   d_s3.bits.data.data := data_s3
 
@@ -622,10 +641,10 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     * Snoop nesting happens when:
     * 1. snoop nests a copy-back request
     * 2. snoop nests a Read/MakeUnique request
-    * 
+    *
     * *NOTICE: Never allow 'b_inv_dirty' on SnpStash*, SnpQuery and other future snoops that would
     *          leave cache line state untouched.
-    * 
+    *
     * *TODO: A SnpOnce* nesting WriteCleanFull would result in SnpResp*_I_PD, which was simple to
     *        implement but could be further optimized.
     */
@@ -670,6 +689,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   val data_s4 = Reg(UInt((blockBytes * 8).W))
   val ren_s4 = RegInit(false.B)
   val need_write_releaseBuf_s4 = RegInit(false.B)
+  val need_write_refillBuf_s4 = RegInit(false.B)
   val isD_s4, isTXREQ_s4, isTXRSP_s4, isTXDAT_s4 = RegInit(false.B)
   val tagError_s4 = RegInit(false.B)
   val dataError_s4 = RegInit(false.B)
@@ -692,6 +712,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     data_s4 := data_s3
     ren_s4 := ren
     need_write_releaseBuf_s4 := need_write_releaseBuf
+    need_write_refillBuf_s4 := need_write_refillBuf
     isD_s4 := isD_s3
     isTXREQ_s4 := isTXREQ_s3
     isTXRSP_s4 := isTXRSP_s3
@@ -704,7 +725,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   // for reqs that CANNOT give response in MainPipe, but needs to write releaseBuf/refillBuf
   // we cannot drop them at s3, we must let them go to s4/s5
   val chnl_fire_s4 = d_s4.fire || txreq_s4.fire || txrsp_s4.fire || txdat_s4.fire
-  val req_drop_s4 = !need_write_releaseBuf_s4 && chnl_fire_s4
+  val req_drop_s4 = !need_write_refillBuf_s4 && !need_write_releaseBuf_s4 && chnl_fire_s4
 
   val chnl_valid_s4 = task_s4.valid && !RegNext(chnl_fire_s3, false.B)
   d_s4.valid := chnl_valid_s4 && isD_s4
@@ -723,6 +744,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   val ren_s5 = RegInit(false.B)
   val data_s5 = Reg(UInt((blockBytes * 8).W))
   val need_write_releaseBuf_s5 = RegInit(false.B)
+  val need_write_refillBuf_s5 = RegInit(false.B)
   val isD_s5, isTXREQ_s5, isTXRSP_s5, isTXDAT_s5 = RegInit(false.B)
   val tagError_s5 = RegInit(false.B)
   val dataMetaError_s5 = RegInit(false.B)
@@ -735,6 +757,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     ren_s5 := ren_s4
     data_s5 := data_s4
     need_write_releaseBuf_s5 := need_write_releaseBuf_s4
+    need_write_refillBuf_s5 := need_write_refillBuf_s4
     isD_s5 := isD_s4 || pendingD_s4
     isTXREQ_s5 := isTXREQ_s4
     isTXRSP_s5 := isTXRSP_s4
@@ -773,6 +796,11 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
 
   customL1Hint.io.l1Hint <> io.l1Hint
 
+  io.refillBufWrite.valid := task_s5.valid && need_write_refillBuf_s5
+  io.refillBufWrite.bits.id := task_s5.bits.mshrId
+  io.refillBufWrite.bits.data.data := rdata_s5
+  io.refillBufWrite.bits.beatMask := Fill(beatSize, true.B)
+
   io.releaseBufWrite.valid := task_s5.valid && need_write_releaseBuf_s5
   io.releaseBufWrite.bits.id := task_s5.bits.mshrId
   io.releaseBufWrite.bits.data.data := rdata_s5
@@ -793,6 +821,13 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   txdat_s5.bits.task.denied := tagError_s5
   txdat_s5.bits.task.corrupt := task_s5.bits.corrupt || dataError_s5
   txdat_s5.bits.data.data := out_data_s5
+
+  io.toAtomicsUnit.atomicsRequest.valid := task_s5.valid && need_write_refillBuf_s5
+  io.toAtomicsUnit.atomicsRequest.bits.opcode := task_s5.bits.opcode
+  io.toAtomicsUnit.atomicsRequest.bits.param := task_s5.bits.param
+  io.toAtomicsUnit.atomicsRequest.bits.amo_data := task_s5.bits.amo_data
+  io.toAtomicsUnit.atomicsRequest.bits.amo_mask := task_s5.bits.amo_mask
+  io.toAtomicsUnit.atomicsRequest.bits.old_data := rdata_s5
 
   /* ======== BlockInfo ======== */
   // if s2/s3 might write Dir, we must block s1 sink entrance
@@ -874,7 +909,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   // ! Caution: s_ and w_ are false-as-valid
   when (req_s3.fromA) {
     alloc_state.s_refill := cmo_cbo_s3
-    alloc_state.w_replResp := cmo_cbo_s3 || dirResult_s3.hit
+    alloc_state.w_replResp := cmo_cbo_s3 || dirResult_s3.hit || req_atomic_s3
     // need Acquire downwards
     when (need_acquire_s3_a) {
       alloc_state.s_acquire := false.B
@@ -898,6 +933,13 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     // need CMOAck
     when (need_cmoresp_s3_a) {
       alloc_state.s_cmoresp := false.B
+    }
+    // atomics downward
+    when (need_atomic_s3_a) {
+      alloc_state.s_atomic.get := false.B
+      alloc_state.s_ncbwrdata.get := false.B
+      alloc_state.w_DBIDResp.get := false.B
+      alloc_state.w_compData.get := false.B
     }
   }
 
