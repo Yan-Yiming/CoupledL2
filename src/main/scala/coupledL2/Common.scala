@@ -74,6 +74,13 @@ class TaskBundle(implicit p: Parameters) extends L2Bundle
   val denied = Bool()
   val corrupt = Bool()
 
+  // atomics accelerate
+  val amo_data = UInt(64.W)
+  val amo_mask = UInt(8.W)
+  // val amo_lgsize = UInt(2.W)
+
+  val amoTask = Bool()
+
   // MSHR may send Release(Data) or Grant(Data) or ProbeAck(Data) through Main Pipe
   val mshrTask = Bool()                   // is task from mshr
   val mshrId = UInt(mshrBits.W)           // mshr entry index (used only in mshr-task)
@@ -153,6 +160,7 @@ class TaskBundle(implicit p: Parameters) extends L2Bundle
     req.srcID := srcID.getOrElse(0.U)
     req.txnID := txnID.getOrElse(0.U)
     req.opcode := chiOpcode.getOrElse(0.U)
+    req.size := log2Ceil(blockBytes).U
     req.addr := Cat(tag, set, 0.U(offsetBits.W))
     req.allowRetry := allowRetry.getOrElse(true.B)  //TODO: consider retry
     req.pCrdType := pCrdType.getOrElse(0.U)
@@ -227,6 +235,8 @@ class MSHRInfo(implicit p: Parameters) extends L2Bundle with HasTLChannelBits {
 
   val replaceData = Bool() // If there is a replace, WriteBackFull or Evict
 
+  val stallSnp = Bool() // stall snoop when atomics operation hit
+
   // release to T with data or UC (e.g. WriteCleanFull)
   val releaseToClean = Bool()
 }
@@ -292,6 +302,12 @@ class FSMState(implicit p: Parameters) extends L2Bundle {
   val s_cbwrdata = chiOpt.map(_ => Bool())
   val s_reissue = chiOpt.map(_ => Bool())
   val s_dct = chiOpt.map(_ => Bool())
+
+  // for Atomic Accelerate
+  val s_atomic = chiOpt.map(_ => Bool())      // atomics opration downwards
+  val s_ncbwrdata = chiOpt.map(_ => Bool())   // WriteData downwards
+  val w_DBIDResp = chiOpt.map(_ => Bool())
+  val w_compData = chiOpt.map(_ => Bool())
 }
 
 class SourceAReq(implicit p: Parameters) extends L2Bundle {
@@ -312,6 +328,14 @@ class SourceBReq(implicit p: Parameters) extends L2Bundle {
   val opcode = UInt(3.W)
   val param = UInt(bdWidth.W)
   val alias = aliasBitsOpt.map(_ => UInt(aliasBitsOpt.get.W))
+}
+
+class AtomicsReq(implicit p: Parameters) extends L2Bundle {
+  val opcode = UInt(3.W)
+  val param = UInt(bdWidth.W)
+  val amo_data = UInt(64.W)
+  val amo_mask = UInt(8.W)
+  val old_data = UInt(64.W)
 }
 
 class BlockInfo(implicit p: Parameters) extends L2Bundle {

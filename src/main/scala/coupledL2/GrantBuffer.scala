@@ -82,12 +82,14 @@ class GrantBuffer(implicit p: Parameters) extends L2Module {
     val grantStatus = Output(Vec(grantBufInflightSize, new GrantStatus))
   })
 
+  val req_atomic = io.d_task.bits.task.amoTask === true.B
+
   // =========== functions ===========
   def toTLBundleD(task: TaskBundle, data: UInt = 0.U, grant_id: UInt = 0.U) = {
     val d = Wire(new TLBundleD(edgeIn.bundle))
     d.opcode := task.opcode
     d.param := task.param
-    d.size := offsetBits.U
+    d.size := Mux(req_atomic, task.size, offsetBits.U)
     d.source := task.sourceId
     d.sink := grant_id
     d.denied := task.denied
@@ -196,7 +198,7 @@ class GrantBuffer(implicit p: Parameters) extends L2Module {
   grantQueueData1.io.deq.ready := grantQueue.io.deq.ready
 
   // if deqTask has data, send the first beat directly and save the remaining beat in grantBuf
-  when(deqValid && io.d.ready && !grantBufValid && deqTask.opcode(0)) {
+  when(deqValid && io.d.ready && !grantBufValid && deqTask.opcode(0) && !deqTask.amoTask) {
     grantBufValid := true.B
     grantBuf.task := deqTask
     grantBuf.task.isKeyword.foreach(_ := deqTask.isKeyword.getOrElse(false.B))

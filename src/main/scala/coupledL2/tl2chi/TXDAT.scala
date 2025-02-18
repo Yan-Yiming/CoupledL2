@@ -87,18 +87,29 @@ class TXDAT(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
   queue.io.deq.ready := dequeueReady
   queueData0.io.deq.ready := dequeueReady
   queueData1.io.deq.ready := dequeueReady
-  when (queue.io.deq.fire) {
+  when (queue.io.deq.fire && queue.io.deq.bits.size === log2Ceil(blockBytes).U) {
+    // whole block transmit
     beatValids.foreach(_ := true.B)
     taskR.task := queue.io.deq.bits
     taskR.data := Cat(queueData1.io.deq.bits.data, queueData0.io.deq.bits.data).asTypeOf(new DSBlock)
+  }.elsewhen (queue.io.deq.fire && (queue.io.deq.bits.size === 2.U || queue.io.deq.bits.size === 3.U)) {
+    beatValids(0) := true.B
+    beatValids(1) := false.B
+    taskR.task := queue.io.deq.bits
+    taskR.data := queueData0.io.deq.bits.data(63, 0).asTypeOf(new DSBlock)
   }
 
   val data = taskR.data.data
   val beatsOH = beatValids.asUInt
-  val (beat, next_beatsOH) = getBeat(data, beatsOH)
+  val fullBlock = (taskR.task.size === log2Ceil(blockBytes).U)
+  // if !fullBlock, then is atomic, only one beat is enough
+  val (fbeat, fnext_beatsOH) = getBeat(data, beatsOH)
+  val beat = Mux(fullBlock, fbeat, 0.U)
+  val next_beatsOH = Mux(fullBlock, fnext_beatsOH, 0.U)
 
   io.out.valid := taskValid
-  io.out.bits := toCHIDATBundle(taskR.task, beat, beatsOH)
+  io.out.bits := Mux(fullBlock, toCHIDATBundle(taskR.task, beat, beatsOH),
+    toCHIDATBundleAtomic(taskR.task, data))
   io.out.bits.respErr := Mux(taskR.task.corrupt,
     Mux(taskR.task.denied, RespErrEncodings.NDERR, RespErrEncodings.DERR), RespErrEncodings.OK)
 
@@ -121,6 +132,28 @@ class TXDAT(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
   def deassertData(data: UInt, mask: UInt): UInt = {
     require(data.getWidth == mask.getWidth * 8)
     FillInterleaved(8, mask) & data
+  }
+
+  def toCHIDATBundleAtomic(task: TaskBundle, data: UInt): CHIDAT = {
+    val dat = WireInit(0.U.asTypeOf(new CHIDAT()))
+
+    dat.tgtID := task.tgtID.get
+    dat.srcID := task.srcID.get
+    dat.txnID := task.txnID.get
+    dat.homeNID := task.homeNID.get
+    dat.dbID := task.dbID.get
+    dat.opcode := task.chiOpcode.get
+    dat.ccID := 0.U // TODO: consider critical chunk id
+
+    // not sure
+    dat.dataID := 0.U
+
+    dat.be := Mux(task.size === 2.U, 15.U(4.W), 255.U(8.W))
+    dat.data := data
+    dat.resp := task.resp.get
+    dat.fwdState := task.fwdState.get
+
+    dat
   }
 
   def toCHIDATBundle(task: TaskBundle, beat: UInt, beatsOH: UInt): CHIDAT = {

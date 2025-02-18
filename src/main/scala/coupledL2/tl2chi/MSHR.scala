@@ -32,6 +32,11 @@ import coupledL2.tl2chi.RespErrEncodings._
 import coupledL2.MetaData._
 import coupledL2._
 
+import freechips.rocketchip.tilelink.TLPermissions._
+import freechips.rocketchip.tilelink.TLMessages._
+import freechips.rocketchip.tilelink._
+import utility.ParallelPriorityMux
+
 
 class MSHRTasks(implicit p: Parameters) extends TL2CHIL2Bundle {
   // outer
@@ -169,6 +174,18 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
 
   val req_mayRepl = req_acquire || req_get || req_prefetch
 
+  val req_atomic = req.opcode === ArithmeticData || req.opcode === LogicalData
+  val req_atomicMissOrBranch = req_atomic && (!dirResult.hit || meta.state === BRANCH)
+  val req_swap = req.opcode === LogicalData && req.param === 3.U // maybe ugly, but finish first
+  val req_and = req.opcode === LogicalData && req.param === 2.U
+  val req_or = req.opcode === LogicalData && req.param === 1.U
+  val req_xor = req.opcode === LogicalData && req.param === 0.U
+  val req_add = req.opcode === ArithmeticData && req.param === 4.U
+  val req_maxu = req.opcode === ArithmeticData && req.param === 3.U
+  val req_minu = req.opcode === ArithmeticData && req.param === 2.U
+  val req_max = req.opcode === ArithmeticData && req.param === 1.U
+  val req_min = req.opcode === ArithmeticData && req.param === 0.U
+
   val req_chiOpcode = req.chiOpcode.get
 
   val snpToN = isSnpToN(req_chiOpcode)
@@ -267,8 +284,9 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
   val release_valid2 = !state.s_reissue.getOrElse(false.B) && !state.w_releaseack && gotRetryAck && gotPCrdGrant
   // Theoretically, data to be released is saved in ReleaseBuffer, so Acquire can be sent as soon as req enters mshr
   // For cmo_clean/flush, dirty data should be released downward first, then Clean req can be sent
-  io.tasks.txreq.valid := !state.s_acquire && !(cmo_cbo && (!state.w_rprobeacklast || !state.w_releaseack || !state.s_cmometaw || !state.s_cbwrdata.get)) || 
+  io.tasks.txreq.valid := !state.s_acquire && !(cmo_cbo && (!state.w_rprobeacklast || !state.w_releaseack || !state.s_cmometaw || !state.s_cbwrdata.get)) ||
                           !state.s_reissue.getOrElse(false.B) && !state.w_grant && gotRetryAck && gotPCrdGrant ||
+                          !state.s_atomic.getOrElse(true.B) ||
                           release_valid2
   val rcompack_valid = !state.s_rcompack.get && state.w_grant &&
     // For issue B, CompAck must not be sent until all transfers of read data have been received.
@@ -280,18 +298,20 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
   val mp_release_valid = release_valid1
   val mp_cbwrdata_valid = !state.s_cbwrdata.getOrElse(true.B) && state.w_releaseack
   val mp_probeack_valid = !state.s_probeack && state.w_pprobeacklast
-  val pending_grant_valid = (!state.s_refill || (!state.s_cmoresp && state.w_releaseack && state.s_cbwrdata.get)) &&
-    state.w_grantlast && state.w_grant && state.w_rprobeacklast
+  val pending_grant_valid = (!state.s_refill || (!state.s_cmoresp && state.w_releaseack && state.s_cbwrdata.get)) && state.w_grantlast && state.w_grant && state.w_rprobeacklast &&
+                            state.w_DBIDResp.getOrElse(true.B)
   val mp_grant_valid = pending_grant_valid && (retryTimes < backoffThreshold.U || backoffTimer === backoffCycles.U)
   val mp_dct_valid = !state.s_dct.getOrElse(true.B) && state.s_probeack
   val mp_cmometaw_valid = !state.s_cmometaw
+  val mp_ncbwrdata_valid = !state.s_ncbwrdata.getOrElse(true.B) && state.w_DBIDResp.getOrElse(false.B) && state.w_releaseack // maybe no need & w_releaseack
   io.tasks.mainpipe.valid :=
     mp_release_valid  ||
     mp_probeack_valid ||
     mp_grant_valid    ||
     mp_cbwrdata_valid ||
     mp_dct_valid      ||
-    mp_cmometaw_valid
+    mp_cmometaw_valid ||
+    mp_ncbwrdata_valid
   // io.tasks.prefetchTrain.foreach(t => t.valid := !state.s_triggerprefetch.getOrElse(true.B))
 
   assert(state.s_refill || state.s_cmoresp, "refill not allowed on CMO operation")
@@ -380,16 +400,29 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
       *  PrefetchWrite        |  ReadUnique
       */
     oa.opcode := ParallelPriorityMux(Seq(
+      (req_atomicMissOrBranch && req_swap)               -> AtomicSwap,
+      (req_atomicMissOrBranch && req_add)                -> AtomicLoad_ADD,
+      (req_atomicMissOrBranch && req_and)                -> AtomicLoad_CLR, // Look CLR
+      (req_atomicMissOrBranch && req_or)                 -> AtomicLoad_SET,
+      (req_atomicMissOrBranch && req_xor)                -> AtomicLoad_EOR,
+      (req_atomicMissOrBranch && req_max)                -> AtomicLoad_SMAX,
+      (req_atomicMissOrBranch && req_min)                -> AtomicLoad_SMIN,
+      (req_atomicMissOrBranch && req_maxu)               -> AtomicLoad_UMAX,
+      (req_atomicMissOrBranch && req_minu)               -> AtomicLoad_UMIN,
       release_valid2                                     -> req_released_chiOpcode,
       req_cboClean                                       -> CleanShared,
       req_cboFlush                                       -> CleanInvalid,
       req_cboInval                                       -> MakeInvalid,
       req_acquirePerm                                    -> MakeUnique,
+      (release_valid2 && isWriteBackFull)                -> WriteBackFull,
+      (release_valid2 && !isWriteBackFull)               -> Evict,
+      (req.opcode === AcquirePerm && req.param === NtoT) -> MakeUnique,
       req_needT                                          -> ReadUnique,
       req_needB /* Default */                            -> ReadNotSharedDirty
     ))
-    oa.size := log2Ceil(blockBytes).U
-    oa.addr := Cat(Mux(release_valid2, dirResult.tag, req.tag), req.set, 0.U(offsetBits.W))
+    oa.size := Mux(req_atomicMissOrBranch, req.size, log2Ceil(blockBytes).U)
+    oa.addr := Mux(req_atomicMissOrBranch, Cat(req.tag, req.set, req.off),
+                    Cat(Mux(release_valid2, dirResult.tag, req.tag), req.set, 0.U(offsetBits.W)))
     oa.ns := false.B
     // set 'LikelyShared' to 1 here when:
     //  - WriteEvictOrEvict (on retry) with SC state
@@ -420,6 +453,10 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     oa.lpIDWithPadding := 0.U
     oa.excl := false.B
     oa.snoopMe := false.B
+
+    //for atomic, false for little endian, true for big endian
+    oa.endian := false.B
+
     oa.traceTag := false.B
     oa
   }
@@ -448,7 +485,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     ob
   }
 
-  val mp_release, mp_probeack, mp_grant, mp_cbwrdata, mp_dct, mp_cmometaw = WireInit(0.U.asTypeOf(new TaskBundle))
+  val mp_release, mp_probeack, mp_grant, mp_cbwrdata, mp_dct, mp_cmometaw, mp_ncbwrdata = WireInit(0.U.asTypeOf(new TaskBundle))
   val mp_release_task = {
     mp_release.channel := req.channel
     mp_release.txChannel := CHIChannel.TXREQ
@@ -712,6 +749,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     mergeA := false.B
   }
   val mp_grant_task = {
+    mp_grant.amoTask := req_atomic
     mp_grant.channel := req.channel
     mp_grant.tag := req.tag
     mp_grant.set := req.set
@@ -722,7 +760,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     mp_grant.isKeyword.foreach(_ := req.isKeyword.getOrElse(false.B))
     mp_grant.opcode := odOpGen(req.opcode)
     mp_grant.param := Mux(
-      req_get || req_prefetch,
+      req_get || req_prefetch || req_atomic,
       0.U, // Get -> AccessAckData
       MuxLookup( // Acquire -> Grant
         req.param,
@@ -734,7 +772,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
         )
       )
     )
-    mp_grant.size := 0.U(msgSizeBits.W)
+    mp_grant.size := Mux(req_atomic, req.size, offsetBits.U) // 0.U(msgSizeBits.W)
     mp_grant.bufIdx := 0.U(bufIdxBits.W)
     mp_grant.needProbeAckData := false.B
     mp_grant.denied := denied
@@ -783,9 +821,10 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
       pfsrc = PfSource.fromMemReqSource(req.reqSource),
       accessed = req_acquire || req_get
     )
-    mp_grant.metaWen := !cmo_cbo
-    mp_grant.tagWen := !cmo_cbo && !dirResult.hit
-    mp_grant.dsWen := gotGrantData || probeDirty && (req_get || req.aliasTask.getOrElse(false.B))
+    // when req_atomicMissOrBranch === true, don't write DS & meta
+    mp_grant.metaWen := !cmo_cbo && !req_atomicMissOrBranch
+    mp_grant.tagWen := !cmo_cbo && !dirResult.hit && !req_atomicMissOrBranch
+    mp_grant.dsWen := gotGrantData || probeDirty && (req_get || req.aliasTask.getOrElse(false.B)) && !req_atomicMissOrBranch
     mp_grant.fromL2pft.foreach(_ := req.fromL2pft.get)
     mp_grant.needHint.foreach(_ := false.B)
     mp_grant.replTask := !dirResult.hit && !state.w_replResp
@@ -961,10 +1000,62 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     mp_cmometaw
   }
 
+
+  val mp_ncbwrdata_task = {
+    mp_ncbwrdata.channel := req.channel
+    mp_ncbwrdata.txChannel := CHIChannel.TXDAT
+    mp_ncbwrdata.tag := req.tag
+    mp_ncbwrdata.set := req.set
+    mp_ncbwrdata.off := req.off
+    mp_ncbwrdata.sourceId := req.sourceId
+    mp_ncbwrdata.alias.foreach(_ := 0.U)
+    mp_ncbwrdata.vaddr.foreach(_ := 0.U)
+    mp_ncbwrdata.isKeyword.foreach(_ := req.isKeyword.getOrElse(false.B))
+    mp_ncbwrdata.opcode := 0.U
+    mp_ncbwrdata.param := 0.U
+    mp_ncbwrdata.size := req.size
+    mp_ncbwrdata.sourceId := 0.U(sourceIdBits.W)
+    mp_ncbwrdata.bufIdx := 0.U(bufIdxBits.W)
+    mp_ncbwrdata.needProbeAckData := false.B
+    mp_ncbwrdata.mshrTask := true.B
+    mp_ncbwrdata.mshrId := io.id
+    mp_ncbwrdata.aliasTask.foreach(_ := false.B)
+    mp_ncbwrdata.useProbeData := false.B  // DontCare
+    mp_ncbwrdata.mshrRetry := false.B
+    mp_ncbwrdata.way := dirResult.way     // not sure
+    mp_ncbwrdata.fromL2pft.foreach(_ := false.B)
+    mp_ncbwrdata.needHint.foreach(_ := false.B)
+    mp_ncbwrdata.dirty := false.B // DontCare
+    mp_ncbwrdata.metaWen := false.B
+    mp_ncbwrdata.meta := MetaEntry()
+    mp_ncbwrdata.tagWen := false.B
+    mp_ncbwrdata.dsWen := false.B
+    mp_ncbwrdata.replTask := false.B
+    mp_ncbwrdata.wayMask := 0.U
+    mp_ncbwrdata.reqSource := 0.U
+    mp_ncbwrdata.mergeA := false.B
+    mp_ncbwrdata.aMergeTask := 0.U.asTypeOf(new MergeTaskBundle)
+
+    // CHI
+    mp_ncbwrdata.tgtID.get := srcid
+    mp_ncbwrdata.srcID.get := 0.U
+    mp_ncbwrdata.txnID.get := dbid
+    mp_ncbwrdata.homeNID.get := 0.U
+    mp_ncbwrdata.dbID.get := 0.U
+    mp_ncbwrdata.chiOpcode.get := NonCopyBackWrData
+    mp_ncbwrdata.resp.get := I        // CHI-Manual Table 4-15
+    mp_ncbwrdata.fwdState.get := 0.U
+    mp_ncbwrdata.pCrdType.get := 0.U  // TODO
+    mp_ncbwrdata.retToSrc.get := req.retToSrc.get   // DontCare
+    mp_ncbwrdata.expCompAck.get := false.B
+
+    mp_ncbwrdata
+  }
   io.tasks.mainpipe.bits := ParallelPriorityMux(
     Seq(
       mp_grant_valid         -> mp_grant,
       mp_release_valid       -> mp_release,
+      mp_ncbwrdata_valid     -> mp_ncbwrdata,
       mp_cbwrdata_valid      -> mp_cbwrdata,
       mp_probeack_valid      -> mp_probeack,
       mp_dct_valid           -> mp_dct,
@@ -997,7 +1088,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
       ("DataSepResp", CHICohStateTransSet.ofDataSepResp(DataSepResp)),
       ("RespSepData", CHICohStateTransSet.ofRespSepData(RespSepData))
     ).foreach { case (name, set) => {
-      assert(!mp_valid || CHICohStateTransSet.isValid(set, 
+      assert(!mp_valid || CHICohStateTransSet.isValid(set,
           mp.txChannel, mp.chiOpcode.get, mp.resp.get),
         s"invalid Resp for ${name}")
     }}
@@ -1021,6 +1112,8 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
       state.s_reissue.get := true.B
       gotRetryAck := false.B
       gotPCrdGrant := false.B
+    }.elsewhen (!state.s_atomic.get) {
+      state.s_atomic.get := true.B
     }
   }
   when (io.tasks.txrsp.fire) {
@@ -1061,6 +1154,8 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
       state.s_cbwrdata.get := true.B
       meta.state := INVALID
       meta.dirty := false.B
+    }.elsewhen (mp_ncbwrdata_valid) {
+      state.s_ncbwrdata.get := true.B
     }.elsewhen (mp_probeack_valid) {
       state.s_probeack := true.B
     }.elsewhen (mp_dct_valid) {
@@ -1148,7 +1243,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     }
 
     when (rxdat.bits.chiOpcode.get === CompData) {
-      require(beatSize == 2) // TODO: This is ugly
+      // require(beatSize == 2) // TODO: This is ugly
       state.w_grantfirst := true.B
       state.w_grantlast := state.w_grantfirst
       state.w_grant := true.B
@@ -1222,6 +1317,11 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
       srcid_retryack := rxrsp.bits.srcID.getOrElse(0.U)
       pcrdtype := rxrsp.bits.pCrdType.getOrElse(0.U)
       gotRetryAck := true.B
+    }
+    when (rxrsp.bits.chiOpcode.get === DBIDResp) {
+      state.w_DBIDResp.get := true.B
+      srcid := rxrsp.bits.srcID.getOrElse(0.U)
+      dbid := rxrsp.bits.dbID.getOrElse(0.U)
     }
   }
 
@@ -1335,6 +1435,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
                                 isWriteEvictFull || isWriteEvictOrEvict
   io.msInfo.bits.releaseToClean := releaseToClean
   io.msInfo.bits.channel := req.channel
+  io.msInfo.bits.stallSnp := req_atomic && (meta.state === TIP || meta.state === TRUNK)
 
   assert(!(c_resp.valid && !io.status.bits.w_c_resp))
   assert(!(rxrsp.valid && rxrsp.bits.chiOpcode.get =/= PCrdGrant && !io.status.bits.w_d_resp))
@@ -1346,7 +1447,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
   val nestedwb_match = req_valid && meta.state =/= INVALID &&
     dirResult.set === io.nestedwb.set &&
     dirResult.tag === io.nestedwb.tag &&
-    state.w_replResp && 
+    state.w_replResp &&
     (state.s_cmoresp || dirResult.hit) &&   // exclude CMO on directory miss
     (req_mayRepl || dirResult.hit)          // exclude non-repl tasks (e.g. Forward Snoop) on directory miss
   val nestedwb_hit_match = req_valid && dirResult.hit &&

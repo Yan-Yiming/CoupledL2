@@ -40,6 +40,12 @@ class RXSNP(
   queue.io.enq <> io.rxsnp
   val task = Wire(new TaskBundle)
 
+  val atomicsBlockSnpMask = VecInit(io.msInfo.map(s =>
+    s.valid && s.bits.set === task.set && s.bits.reqTag === task.tag &&
+    s.bits.stallSnp && !s.bits.willFree
+  )).asUInt
+  val atomicsBlockSnp = atomicsBlockSnpMask.orR
+
   /**
     * When should an MSHR with Acquire address of X block/nest an incoming snoop with address X?
     * 
@@ -113,7 +119,7 @@ class RXSNP(
 
   task := fromSnpToTaskBundle(rxsnp.bits)
 
-  val stall = reqBlockSnp || replaceBlockSnp || cmoBlockSnp // addrConflict || replaceConflict
+  val stall = reqBlockSnp || replaceBlockSnp || cmoBlockSnp || atomicsBlockSnp // addrConflict || replaceConflict
   io.task.valid := rxsnp.valid && !stall
   io.task.bits := task
   rxsnp.ready := io.task.ready && !stall

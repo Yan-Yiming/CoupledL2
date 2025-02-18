@@ -52,13 +52,19 @@ class Slice()(implicit p: Parameters) extends BaseSlice[OuterBundle]
   /* Data path and control path */
   val directory = Module(new Directory())
   val dataStorage = Module(new DataStorage())
-  val refillBuf = Module(new MSHRBuffer(wPorts = 2))
+  val refillBuf = Module(new MSHRBuffer(wPorts = 3))
   val releaseBuf = Module(new MSHRBuffer(wPorts = 3))
 
   val reqArb = Module(new RequestArb())
   val mainPipe = Module(new MainPipe())
   val reqBuf = Module(new RequestBuffer())
   val mshrCtl = Module(new MSHRCtl())
+
+  val atomicsUnit = Module(new AtomicsUnitL2())
+
+  atomicsUnit.io.fromMainPipe <> mainPipe.io.toAtomicsUnit
+  atomicsUnit.io.fromMainPipe.atomicsRequest := mainPipe.io.toAtomicsUnit.atomicsRequest
+  mainPipe.io.fromAtomicsUnit.atomicsResult <> atomicsUnit.io.toMainPipe.atomicsResult
   private val mbistPl = MbistPipeline.PlaceMbistPipeline(2, "L2Slice", p(L2ParamKey).hasMbist)
   sinkC.io.msInfo := mshrCtl.io.msInfo
 
@@ -162,8 +168,10 @@ class Slice()(implicit p: Parameters) extends BaseSlice[OuterBundle]
   ))
 
   /* Read and write refill buffer */
+  val mpWriteRefillBuf = Wire(Valid(new MSHRBufWrite()))
+  mpWriteRefillBuf := mainPipe.io.refillBufWrite
   refillBuf.io.r := reqArb.io.refillBufRead_s2
-  refillBuf.io.w <> VecInit(Seq(rxdat.io.refillBufWrite, sinkC.io.refillBufWrite))
+  refillBuf.io.w <> VecInit(Seq(rxdat.io.refillBufWrite, sinkC.io.refillBufWrite, mpWriteRefillBuf))
 
   io.prefetch.foreach { p =>
     p.train <> mainPipe.io.prefetchTrain.get

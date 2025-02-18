@@ -575,6 +575,7 @@ class MSHR(implicit p: Parameters) extends L2Module {
   io.msInfo.bits.meta := meta
   io.msInfo.bits.meta.dirty := meta.dirty || probeDirty
   io.msInfo.bits.channel := req.channel
+  io.msInfo.bits.stallSnp := DontCare
 
   assert(!(c_resp.valid && !io.status.bits.w_c_resp))
   assert(!(d_resp.valid && !io.status.bits.w_d_resp))
