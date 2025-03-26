@@ -92,7 +92,7 @@ class TXDAT(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     beatValids.foreach(_ := true.B)
     taskR.task := queue.io.deq.bits
     taskR.data := Cat(queueData1.io.deq.bits.data, queueData0.io.deq.bits.data).asTypeOf(new DSBlock)
-  }.elsewhen (queue.io.deq.fire && (queue.io.deq.bits.size === 2.U || queue.io.deq.bits.size === 3.U)) {
+  }.elsewhen (queue.io.deq.fire && (queue.io.deq.bits.size === 3.U)) {
     beatValids(0) := true.B
     beatValids(1) := false.B
     taskR.task := queue.io.deq.bits
@@ -151,7 +151,9 @@ class TXDAT(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     dat.be := Mux(task.size === 2.U, 15.U(4.W), 255.U(8.W))
     dat.data := data
     dat.resp := task.resp.get
-    dat.fwdState := task.fwdState.get
+    // TODO: 0.U for the error when compile
+    // Cannot reassign to read-only TXDAT.io_out_bits_?: OpResult[UInt<3>]
+    dat.setFwdState(task.fwdState.get)
 
     dat
   }

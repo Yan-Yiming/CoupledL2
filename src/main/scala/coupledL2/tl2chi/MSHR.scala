@@ -287,7 +287,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
   val mp_cbwrdata_valid = !state.s_cbwrdata.getOrElse(true.B) && state.w_releaseack
   val mp_probeack_valid = !state.s_probeack && state.w_pprobeacklast
   val pending_grant_valid = (!state.s_refill || (!state.s_cmoresp && state.w_releaseack && state.s_cbwrdata.get)) && state.w_grantlast && state.w_grant && state.w_rprobeacklast &&
-                            state.w_DBIDResp.getOrElse(true.B)
+                            state.w_DBIDResp.getOrElse(true.B) && state.w_compData.getOrElse(true.B) 
   val mp_grant_valid = pending_grant_valid && (retryTimes < backoffThreshold.U || backoffTimer === backoffCycles.U)
   val mp_dct_valid = !state.s_dct.getOrElse(true.B) && state.s_probeack
   val mp_cmometaw_valid = !state.s_cmometaw
@@ -729,6 +729,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
   }
   val mp_grant_task    = {
     mp_grant.amoTask := req_atomic
+    mp_grant.amoMissorBranch := req_atomicMissOrBranch
     mp_grant.channel := req.channel
     mp_grant.tag := req.tag
     mp_grant.set := req.set
@@ -988,6 +989,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     mp_ncbwrdata.sourceId := 0.U(sourceIdBits.W)
     mp_ncbwrdata.bufIdx := 0.U(bufIdxBits.W)
     mp_ncbwrdata.needProbeAckData := false.B
+    mp_ncbwrdata.amo_data := req.amo_data
     mp_ncbwrdata.mshrTask := true.B
     mp_ncbwrdata.mshrId := io.id
     mp_ncbwrdata.aliasTask.foreach(_ := false.B)
@@ -1215,6 +1217,9 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     }
 
     when (rxdat.bits.chiOpcode.get === CompData) {
+      // only for AMO accelerate
+      state.w_compData.get := true.B
+
       // require(beatSize == 2) // TODO: This is ugly
       state.w_grantfirst := true.B
       state.w_grantlast := state.w_grantfirst
@@ -1345,11 +1350,15 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
     state.s_compack.getOrElse(true.B) &&
     state.s_cbwrdata.getOrElse(true.B) &&
     state.s_reissue.getOrElse(true.B) &&
+    state.s_atomic.getOrElse(true.B) &&
+    state.s_ncbwrdata.getOrElse(true.B) &&
     state.s_dct.getOrElse(true.B) &&
     state.s_cmoresp &&
     state.s_cmometaw
   val no_wait = state.w_rprobeacklast && state.w_pprobeacklast && state.w_grantlast && state.w_grant &&
-    state.w_releaseack && state.w_replResp
+    state.w_releaseack && state.w_replResp &&
+    state.w_DBIDResp.getOrElse(true.B) &&
+    state.w_compData.getOrElse(true.B)
   val will_free = no_schedule && no_wait
   when (will_free && req_valid) {
     req_valid := false.B
@@ -1367,7 +1376,7 @@ class MSHR(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes {
   io.status.bits.needsRepl := releaseNotSent
   // wait for resps, high as valid
   io.status.bits.w_c_resp := !state.w_rprobeacklast || !state.w_pprobeacklast || !state.w_pprobeack
-  io.status.bits.w_d_resp := !state.w_grantlast || !state.w_grant || !state.w_releaseack
+  io.status.bits.w_d_resp := !state.w_grantlast || !state.w_grant || !state.w_releaseack || !state.w_compData.getOrElse(true.B)
   io.status.bits.will_free := will_free
   io.status.bits.is_miss := !dirResult.hit
   io.status.bits.is_prefetch := req_prefetch

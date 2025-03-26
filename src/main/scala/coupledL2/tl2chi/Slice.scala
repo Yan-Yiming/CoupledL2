@@ -65,6 +65,7 @@ class Slice()(implicit p: Parameters) extends BaseSlice[OuterBundle]
   atomicsUnit.io.fromMainPipe <> mainPipe.io.toAtomicsUnit
   atomicsUnit.io.fromMainPipe.atomicsRequest := mainPipe.io.toAtomicsUnit.atomicsRequest
   mainPipe.io.fromAtomicsUnit.atomicsResult <> atomicsUnit.io.toMainPipe.atomicsResult
+  mainPipe.io.fromAtomicsUnit.old_data_back <> atomicsUnit.io.toMainPipe.old_data_back
   
   sinkC.io.msInfo := mshrCtl.io.msInfo
 

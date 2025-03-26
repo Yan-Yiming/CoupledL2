@@ -34,6 +34,7 @@ class RXRSP(implicit p: Parameters) extends TL2CHIL2Module {
    2. CompDBIDResp
    3. RetryAck
    4. PCrdGrant
+   5. DBIDResp
    */
   io.in.valid := io.out.valid 
   io.in.mshrId := io.out.bits.txnID
