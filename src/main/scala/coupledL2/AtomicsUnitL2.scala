@@ -32,80 +32,85 @@ import org.chipsalliance.cde.config.Parameters
 
 class AMOALU(operandBits: Int) extends Module
 //  with MemoryOpConstants
-  {
-  val minXLen = 32
-  val widths = (0 to log2Ceil(operandBits / minXLen)).map(minXLen << _)
-
+{
   val io = IO(new Bundle {
-    val mask = Input(UInt((operandBits/8).W))
-    val opcode = Input(Bits(3.W))
-	  val param = Input(Bits(3.W))
-    val lhs = Input(Bits(operandBits.W))
-    val rhs = Input(Bits(operandBits.W))
-    val out = Output(Bits(operandBits.W))
-    val out_unmasked = Output(Bits(operandBits.W))
+    val opcode = Input(UInt(3.W))
+    val param = Input(UInt(3.W))
+    val data1 = Input(UInt(operandBits.W))
+    val data2 = Input(UInt(operandBits.W))
+    val out = Output(UInt(operandBits.W))
   })
 
-  val max = io.opcode === ArithmeticData && (io.param === 1.U || io.param === 3.U) // M_XA_MAX || M_XA_MAXU
-  val min = io.opcode === ArithmeticData && (io.param === 0.U || io.param === 2.U) // M_XA_MIN || M_XA_MINU
-  val add = io.opcode === ArithmeticData && io.param === 4.U // M_XA_ADD
-  val logic_and = io.opcode === LogicalData && (io.param === 1.U || io.param === 2.U) // M_XA_OR || M_XA_AND
-  val logic_xor = io.opcode === LogicalData && io.param === 0.U // M_XA_XOR || M_XA_OR
+//  val max = io.opcode === ArithmeticData && (io.param === 1.U || io.param === 3.U) // M_XA_MAX || M_XA_MAXU
+//  val min = io.opcode === ArithmeticData && (io.param === 0.U || io.param === 2.U) // M_XA_MIN || M_XA_MINU
+    val add = io.opcode === ArithmeticData && io.param === 4.U // M_XA_ADD
+//  val logic_and = io.opcode === LogicalData && (io.param === 1.U || io.param === 2.U) // M_XA_OR || M_XA_AND
+//  val logic_xor = io.opcode === LogicalData && io.param === 0.U // M_XA_XOR || M_XA_OR
+//  val logic_xor = io.opcode === LogicalData && io.param === 0.U // M_XA_XOR || M_XA_OR
+    val swap = io.opcode === LogicalData && io.param === 3.U
 
-  val adder_out = {
-    // partition the carry chain to support sub-xLen addition
-    val mask = ~(0.U(operandBits.W) +: widths.init.map(w => !io.mask(w/8-1) << (w-1))).reduce(_|_)
-    (io.lhs & mask) + (io.rhs & mask)
-  }
-
-  val less = {
-    // break up the comparator so the lower parts will be CSE'd
-    def isLessUnsigned(x: UInt, y: UInt, n: Int): Bool = {
-      if (n == minXLen) x(n-1, 0) < y(n-1, 0)
-      else x(n-1, n/2) < y(n-1, n/2) || x(n-1, n/2) === y(n-1, n/2) && isLessUnsigned(x, y, n/2)
-    }
-
-    def isLess(x: UInt, y: UInt, n: Int): Bool = {
-      val signed = {
-		    io.opcode === ArithmeticData && (io.param === 0.U || io.param === 1.U)
-      }
-      Mux(x(n-1) === y(n-1), isLessUnsigned(x, y, n), Mux(signed, x(n-1), y(n-1)))
-    }
-
-    PriorityMux(widths.reverse.map(w => (io.mask(w/8/2), isLess(io.lhs, io.rhs, w))))
-  }
-
-  val minmax = Mux(Mux(less, min, max), io.lhs, io.rhs)
-  val logic =
-    Mux(logic_and, io.lhs & io.rhs, 0.U) |
-    Mux(logic_xor, io.lhs ^ io.rhs, 0.U)
-  val out =
-    Mux(add,                    adder_out,
-    Mux(logic_and || logic_xor, logic,
-                                minmax))
-
-  val wmask = FillInterleaved(8, io.mask)
-  io.out := wmask & out | ~wmask & io.lhs
-  io.out_unmasked := out
+  io.out := Mux(add, io.data1 + io.data2, io.data1)
 }
 
 class AtomicsUnitL2(implicit p: Parameters) extends TL2CHIL2Module {
-	val io = IO(new Bundle() {    
+  val io = IO(new Bundle() {
     val fromMainPipe = new Bundle() {
       val atomicsRequest = Flipped(ValidIO(new AtomicsReq()))
     }
 
-		val toMainPipe = new Bundle() {
-      val atomicsResult = Output(UInt(64.W))
+    val toMainPipe = new Bundle() {
+      val atomicsResult = Output(UInt(512.W))
+      val old_data_back = Output(UInt(64.W))
     }
-	})
+  })
 
-	val amoalu = Module(new AMOALU(64))
-	amoalu.io.mask := io.fromMainPipe.atomicsRequest.bits.amo_mask
-	amoalu.io.opcode := io.fromMainPipe.atomicsRequest.bits.opcode
-	amoalu.io.param := io.fromMainPipe.atomicsRequest.bits.param
-	amoalu.io.lhs := io.fromMainPipe.atomicsRequest.bits.old_data
-	amoalu.io.rhs := io.fromMainPipe.atomicsRequest.bits.amo_data
+  def data_trans_blockto64(data_block: UInt, offset: UInt): UInt = {
+    val off_valid = (offset === 0.U) || (offset === 8.U) || (offset === 16.U) || (offset === 32.U) ||
+      (offset === 40.U) || (offset === 48.U) || (offset === 56.U) || (offset === 24.U)
+    assert(off_valid, "amo_data not alias")
+    val data_ret = (data_block >> (offset * 8.U)).asUInt
+    data_ret(63, 0)
+  }
+  def data_trans_64toblock(data_block: UInt, offset: UInt, new_data: UInt): UInt = {
+    val off_valid = (offset === 0.U) || (offset === 8.U) || (offset === 16.U) || (offset === 32.U) ||
+      (offset === 40.U) || (offset === 48.U) || (offset === 56.U) || (offset === 24.U)
+    assert(off_valid, "amo_data not alias")
 
-  io.toMainPipe.atomicsResult := amoalu.io.out
+    val OFFSET = (offset * 8.U)
+    val tmp1 = (1.U << OFFSET) - 1.U
+    val tmp2 = data_block & tmp1
+
+    val new_data_block0 = (data_block >> (OFFSET + 64.U)).asUInt
+    val new_data_block1 = ((new_data_block0 << 64.U) | new_data).asUInt
+    val new_data_block2 = (new_data_block1 << OFFSET).asUInt | tmp2
+
+    new_data_block2
+  }
+
+  val amoalu = Module(new AMOALU(64))
+  val data1 = RegInit(0.U(64.W))
+  val data2 = RegInit(0.U(64.W))
+  val data3 = RegInit(0.U(512.W))
+  val offset = RegInit(0.U(6.W))
+  val opcode = RegInit(0.U(3.W))
+  val param = RegInit(0.U(3.W))
+
+  when (io.fromMainPipe.atomicsRequest.valid === true.B) {
+    data1 := io.fromMainPipe.atomicsRequest.bits.amo_data
+    data2 := data_trans_blockto64(io.fromMainPipe.atomicsRequest.bits.old_data, io.fromMainPipe.atomicsRequest.bits.data_off)
+    data3 := io.fromMainPipe.atomicsRequest.bits.old_data
+    offset := io.fromMainPipe.atomicsRequest.bits.data_off
+    opcode := io.fromMainPipe.atomicsRequest.bits.opcode
+    param := io.fromMainPipe.atomicsRequest.bits.param
+  }
+
+//  amoalu.io.opcode := io.fromMainPipe.atomicsRequest.bits.opcode
+//  amoalu.io.param := io.fromMainPipe.atomicsRequest.bits.param
+  amoalu.io.data1 := data1
+  amoalu.io.data2 := data2
+  amoalu.io.opcode := opcode
+  amoalu.io.param := param
+
+  io.toMainPipe.atomicsResult := data_trans_64toblock(data3, offset, amoalu.io.out)
+  io.toMainPipe.old_data_back := data1
 }

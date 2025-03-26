@@ -69,7 +69,8 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     }
 
     val fromAtomicsUnit = new Bundle() {
-      val atomicsResult = Input(UInt(64.W))
+      val atomicsResult = Input(UInt(512.W))
+      val old_data_back = Input(UInt(64.W))
     }
 
     /* read C-channel Release Data and write into DS */
@@ -531,9 +532,13 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     !mshr_req_s3,
     c_releaseData_s3,
     Mux(
-      req_s3.useProbeData,
-      io.releaseBufResp_s3.bits.data,
-      io.refillBufResp_s3.bits.data
+      req_s3.amoTask,
+      io.fromAtomicsUnit.atomicsResult,
+      Mux(
+        req_s3.useProbeData,
+        io.releaseBufResp_s3.bits.data,
+        io.refillBufResp_s3.bits.data
+      )
     )
   )
 
@@ -546,11 +551,11 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
     need_data_b && need_mshr_s3_b ||
     need_data_mshr_repl ||
     need_data_cmo ||
-    req_atomic_s3 && meta_s3.state === TRUNK
+    req_atomic_s3 && dirResult_s3.hit && meta_s3.state === TRUNK
   // B: need_write_refillBuf indicates that DS should be read and the data will be written into RefillBuffer
   //    when L1 AcquireBlock but L2 AcquirePerm to L3, we need to prepare data for L1
   //    but this will no longer happen, cuz we always AcquireBlock for L1 AcquireBlock
-  val need_write_refillBuf = req_atomic_s3 && meta_s3.state === TIP
+  val need_write_refillBuf = req_atomic_s3 && dirResult_s3.hit && meta_s3.state === TIP
 
   /* ======== Write Directory ======== */
   // B, C: Requests from Channel B (RXSNP) and Channel C would only downgrade permission,
@@ -660,7 +665,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   )
   val isD_s3_ready = Mux(
     mshr_req_s3,
-    mshr_cmoresp_s3 && !io.cmoAllBlock.getOrElse(false.B) || mshr_refill_s3 && !retry,
+    (mshr_cmoresp_s3 && !io.cmoAllBlock.getOrElse(false.B) || mshr_refill_s3 && !retry) || (mshr_accessackdata_s3 && req_s3.amoTask),
     req_s3.fromC || req_s3.fromA && !need_mshr_s3_a && !data_unready_s3_tl && req_s3.opcode =/= Hint && !d_s3_latch.B
   )
   val isTXRSP_s3 = Mux(
@@ -691,9 +696,9 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   txrsp_s3.bits := source_req_s3
   txdat_s3.bits.task := source_req_s3
   // mshr_ncbWrData_s3 only for AMO, not good enough
-  txdat_s3.bits.data.data := Mux(mshr_ncbWrData_s3, req_s3.amo_data, data_s3)
+  txdat_s3.bits.data.data := Mux(mshr_ncbWrData_s3, Fill(8, req_s3.amo_data), data_s3)
   d_s3.bits.task := source_req_s3
-  d_s3.bits.data.data := data_s3
+  d_s3.bits.data.data := Mux(mshr_accessackdata_s3 && source_req_s3.amoTask && !source_req_s3.amoMissorBranch, Fill(8, io.fromAtomicsUnit.old_data_back), data_s3)
 
   when (task_s3.valid) {
     OneHot.checkOneHot(Seq(isTXREQ_s3, isTXRSP_s3, isTXDAT_s3, isD_s3))
@@ -755,6 +760,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
 
   /* ======== Stage 4 ======== */
   val task_s4 = RegInit(0.U.asTypeOf(Valid(new TaskBundle())))
+  val req_atomic_s4 = RegInit(false.B)
   val data_unready_s4 = RegInit(false.B)
   val data_s4 = Reg(UInt((blockBytes * 8).W))
   val ren_s4 = RegInit(false.B)
@@ -778,6 +784,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
       task_s4.bits.mshrId := io.fromMSHRCtl.mshr_alloc_ptr
     }
 
+    req_atomic_s4 := req_atomic_s3
     data_unready_s4 := data_unready_s3
     data_s4 := data_s3
     ren_s4 := ren
@@ -811,6 +818,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
 
   /* ======== Stage 5 ======== */
   val task_s5 = RegInit(0.U.asTypeOf(Valid(new TaskBundle())))
+  val req_atomic_s5 = RegInit(false.B)
   val ren_s5 = RegInit(false.B)
   val data_s5 = Reg(UInt((blockBytes * 8).W))
   val need_write_releaseBuf_s5 = RegInit(false.B)
@@ -824,6 +832,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
 
   when (task_s4.valid && !req_drop_s4) {
     task_s5.bits := task_s4.bits
+    req_atomic_s5 := req_atomic_s4
     ren_s5 := ren_s4
     data_s5 := data_s4
     need_write_releaseBuf_s5 := need_write_releaseBuf_s4
@@ -866,7 +875,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
 
   customL1Hint.io.l1Hint <> io.l1Hint
 
-  io.refillBufWrite.valid := task_s5.valid && need_write_refillBuf_s5
+  io.refillBufWrite.valid := task_s5.valid && req_atomic_s5
   io.refillBufWrite.bits.id := task_s5.bits.mshrId
   io.refillBufWrite.bits.data.data := rdata_s5
   io.refillBufWrite.bits.beatMask := Fill(beatSize, true.B)
@@ -898,6 +907,7 @@ class MainPipe(implicit p: Parameters) extends TL2CHIL2Module with HasCHIOpcodes
   io.toAtomicsUnit.atomicsRequest.bits.amo_data := task_s5.bits.amo_data
   io.toAtomicsUnit.atomicsRequest.bits.amo_mask := task_s5.bits.amo_mask
   io.toAtomicsUnit.atomicsRequest.bits.old_data := rdata_s5
+  io.toAtomicsUnit.atomicsRequest.bits.data_off := task_s5.bits.off
 
   /* ======== BlockInfo ======== */
   // if s2/s3 might write Dir, we must block s1 sink entrance

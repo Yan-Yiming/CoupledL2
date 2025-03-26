@@ -80,6 +80,7 @@ class TaskBundle(implicit p: Parameters) extends L2Bundle
   // val amo_lgsize = UInt(2.W)
 
   val amoTask = Bool()
+  val amoMissorBranch = Bool()
 
   // MSHR may send Release(Data) or Grant(Data) or ProbeAck(Data) through Main Pipe
   val mshrTask = Bool()                   // is task from mshr
@@ -161,7 +162,7 @@ class TaskBundle(implicit p: Parameters) extends L2Bundle
     req.txnID := txnID.getOrElse(0.U)
     req.opcode := chiOpcode.getOrElse(0.U)
     req.size := log2Ceil(blockBytes).U
-    req.addr := Cat(tag, set, 0.U(offsetBits.W))
+    req.addr := Mux(amoTask, Cat(tag, set, off), Cat(tag, set, 0.U(offsetBits.W)))
     req.allowRetry := allowRetry.getOrElse(true.B)  //TODO: consider retry
     req.pCrdType := pCrdType.getOrElse(0.U)
     req.expCompAck := expCompAck.getOrElse(false.B)
@@ -335,7 +336,8 @@ class AtomicsReq(implicit p: Parameters) extends L2Bundle {
   val param = UInt(bdWidth.W)
   val amo_data = UInt(64.W)
   val amo_mask = UInt(8.W)
-  val old_data = UInt(64.W)
+  val old_data = UInt(512.W)
+  val data_off = UInt(6.W)
 }
 
 class BlockInfo(implicit p: Parameters) extends L2Bundle {
