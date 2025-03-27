@@ -57,7 +57,6 @@ class AtomicsUnitL2(implicit p: Parameters) extends TL2CHIL2Module {
     val fromMainPipe = new Bundle() {
       val atomicsRequest = Flipped(ValidIO(new AtomicsReq()))
     }
-
     val toMainPipe = new Bundle() {
       val atomicsResult = Output(UInt(512.W))
       val old_data_back = Output(UInt(64.W))
