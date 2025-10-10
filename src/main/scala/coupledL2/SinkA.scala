@@ -53,6 +53,11 @@ class SinkA(implicit p: Parameters) extends L2Module {
     task.corrupt := a.corrupt
     task.bufIdx := 0.U(bufIdxBits.W)
     task.needProbeAckData := false.B
+
+    task.amo_data := a.data(63, 0)
+    task.amo_mask := a.mask
+
+    task.amoTask := false.B
     task.mshrTask := false.B
     task.mshrId := 0.U(mshrBits.W)
     task.aliasTask.foreach(_ := false.B)
