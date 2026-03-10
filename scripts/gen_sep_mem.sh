@@ -11,4 +11,4 @@ for line in `cat $conf_file`; do
   ${mem_script} ${conf_file}.tmp -o ${output_dir}/${file}.v
 done
 
-rm ${conf_file}.tmp
+rm -f ${conf_file}.tmp

@@ -11,6 +11,7 @@ import freechips.rocketchip.tilelink._
 import huancun._
 import coupledL2.prefetch._
 import coupledL2.tl2tl._
+import coupledL2.cchi2chi._
 import utility._
 
 
@@ -22,6 +23,23 @@ object baseConfig {
       case MaxHartIdBits => maxHartIdBits
     })
   }
+}
+
+class TestTop_CCHITEST_L2()(implicit p: Parameters) extends Module {
+
+  /*  L1D(cchi-test)
+   *        |
+   *        |
+   *  DummyL2WithMem
+   */
+
+  val io = IO(new Bundle {
+    val cpuPort = Flipped(new CCHIPortIO)
+  })
+
+  val l2 = Module(new CCHIDummyL2WithMem())
+
+  l2.io.port <> io.cpuPort
 }
 
 class TestTop_L2()(implicit p: Parameters) extends LazyModule {
@@ -670,6 +688,22 @@ private[coupledL2] object TestTopFirtoolOptions {
     FirtoolOption("--repl-seq-mem"),
     FirtoolOption("--repl-seq-mem-file=TestTop.sv.conf"),
     FirtoolOption("--lowering-options=explicitBitcast")
+  )
+}
+
+object TestTop_CCHITEST_L2 extends App {
+  val config = baseConfig(1).alterPartial({
+    case L2ParamKey => L2Param(
+      clientCaches = Seq(L1Param(aliasBitsOpt = Some(2))),
+      echoField = Seq(DirtyField())
+    )
+  })
+
+  (new ChiselStage).execute(args,
+    Seq(
+      // 使用 Annotation 告诉编译器生成哪个 Module
+      ChiselGeneratorAnnotation(() => new TestTop_CCHITEST_L2()(config))
+    ) ++ TestTopFirtoolOptions() // 加上这个非常重要，包含生成 .sv 文件的配置
   )
 }
 

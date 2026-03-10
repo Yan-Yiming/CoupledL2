@@ -39,6 +39,9 @@ gen-test-top-chi:
 	mill -i CoupledL2.test.runMain coupledL2.$(TOP)_$(SYSTEM) -td $(BUILD_DIR) $(CHI_TOP_ARGS) --target systemverilog --split-verilog
 	$(MEM_GEN_SEP) "$(MEM_GEN)" "$(TOP_V).conf" "$(BUILD_DIR)"
 
+test-top-cchi-dummyl2:
+	$(MAKE) gen-test-top SYSTEM=CCHITEST_L2
+
 test-top-l2:
 	$(MAKE) gen-test-top SYSTEM=L2
 
