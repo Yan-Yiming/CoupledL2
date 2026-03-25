@@ -3,7 +3,10 @@
 	url = https://github.com/OpenXiangShan/rocket-chip.git
 [submodule "utility"]
 	path = utility
-	url = https://github.com/OpenXiangShan/utility
+	url = https://github.com/OpenXiangShan/utility.git
 [submodule "HuanCun"]
 	path = HuanCun
 	url = https://github.com/OpenXiangShan/HuanCun.git
+[submodule "OpenNCB"]
+	path = OpenNCB
+	url = https://github.com/OpenXiangShan/OpenNCB.git
