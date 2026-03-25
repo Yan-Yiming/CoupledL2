@@ -427,6 +427,8 @@ abstract class CoupledL2Base(implicit p: Parameters) extends LazyModule with Has
               case EdgeOutKey => edgeOut
               case BankBitsKey => bankBits
               case SliceIdKey => i
+              case utility.chi.CHIDataCheckKey => cacheParams.dataCheck.getOrElse("none")
+              case utility.chi.CHIEnablePoisonKey => cacheParams.enablePoison
             }))
           } else {
             Module(new tl2tl.Slice()(p.alterPartial {
