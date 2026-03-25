@@ -16,6 +16,8 @@ def defaultVersions = Map(
   "chisel-plugin" -> ivy"org.chipsalliance:::chisel-plugin:7.0.0"
 )
 
+val pwd = os.Path(sys.env("MILL_WORKSPACE_ROOT"))
+
 trait HasChisel extends ScalaModule {
   def chiselModule: Option[ScalaModule] = None
 
@@ -37,7 +39,7 @@ trait HasChisel extends ScalaModule {
 
 object rocketchip extends `rocket-chip`.common.RocketChipModule with HasChisel {
 
-  val rcPath = os.pwd / "rocket-chip"
+  val rcPath = pwd / "rocket-chip"
   override def millSourcePath = rcPath
 
   def mainargsIvy = ivy"com.lihaoyi::mainargs:0.7.0"
@@ -65,7 +67,7 @@ object rocketchip extends `rocket-chip`.common.RocketChipModule with HasChisel {
 }
 
 object utility extends SbtModule with HasChisel {
-  override def millSourcePath = os.pwd / "utility"
+  override def millSourcePath = pwd / "utility"
 
   override def moduleDeps = super.moduleDeps ++ Seq(rocketchip)
 
@@ -75,15 +77,20 @@ object utility extends SbtModule with HasChisel {
 }
 
 object huancun extends SbtModule with HasChisel {
-  override def millSourcePath = os.pwd / "HuanCun"
+  override def millSourcePath = pwd / "HuanCun"
   override def moduleDeps = super.moduleDeps ++ Seq(
     rocketchip, utility
   )
 }
 
+object openNCB extends HasChisel {
+  override def millSourcePath = pwd / "openNCB"
+  override def moduleDeps = super.moduleDeps ++ Seq(rocketchip)
+}
+
 object CoupledL2 extends SbtModule with HasChisel with millbuild.common.CoupledL2Module {
 
-  override def millSourcePath = millOuterCtx.millSourcePath
+  override def millSourcePath = pwd / "coupledL2"
 
   def rocketModule: ScalaModule = rocketchip
 
@@ -92,6 +99,22 @@ object CoupledL2 extends SbtModule with HasChisel with millbuild.common.CoupledL
   def huancunModule: ScalaModule = huancun
 
   object test extends SbtModuleTests with TestModule.ScalaTest
+
+  override def scalacOptions = super.scalacOptions() ++ Agg("-deprecation", "-feature")
+
+}
+
+object OpenLLC extends HasChisel with millbuild.common.OpenLLCModule {
+
+  override def millSourcePath = pwd / "openLLC"
+
+  def rocketModule: ScalaModule = rocketchip
+
+  def utilityModule: ScalaModule = utility
+
+  def openNCBModule: ScalaModule = openNCB
+
+  object test extends SbtTests with TestModule.ScalaTest
 
   override def scalacOptions = super.scalacOptions() ++ Agg("-deprecation", "-feature")
 
