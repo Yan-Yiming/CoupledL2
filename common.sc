@@ -18,7 +18,9 @@ trait OpenLLCModule extends ScalaModule {
 
   def utilityModule: ScalaModule
 
+  def coupledL2Module: ScalaModule
+
   def openNCBModule: ScalaModule
 
-  override def moduleDeps = super.moduleDeps ++ Seq(rocketModule, utilityModule, openNCBModule)
+  override def moduleDeps = super.moduleDeps ++ Seq(rocketModule, utilityModule, openNCBModule, coupledL2Module)
 }
